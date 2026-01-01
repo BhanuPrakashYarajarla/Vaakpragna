@@ -204,3 +204,12 @@ http://127.0.0.1:5000
 | 🥈 **Silver Badge** | Complete **50 debates** | Silver badge unlocked |
 | 🥇 **Gold Badge** | Complete **100+ debates** | Gold badge + Certificate of Achievement |
 
+---
+## 👥 Contributors
+
+| Name | Role | Contribution |
+|------|------|--------------|
+| **Bhanu Prakash** | Backend Developer | Core backend development, AI integration, database design |
+| **Sree Harshini** | Frontend Developer | UI development, frontend logic, user interaction flows |
+
+
