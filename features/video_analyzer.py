@@ -11,11 +11,9 @@ logging.getLogger('mediapipe').setLevel(logging.ERROR)
 from flask import Blueprint, render_template, request, jsonify, Response
 import cv2, mediapipe as mp, dlib, re
 import numpy as np
-import google.generativeai as genai
+from features.gemini_client import generate_text
 
 video_analyzer_bp = Blueprint("video_analyzer", __name__)
-genai.configure(api_key="AIzaSyAlpyIaKMRn7cVdJLAa5HU0xETAK9E3-08")
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'shape_predictor_68_face_landmarks.dat')
 
@@ -167,8 +165,7 @@ Voice Metrics:
 
 def call_gemini(prompt):
     try:
-        response = gemini_model.generate_content(prompt)
-        full_text = response.text.strip()
+        full_text = generate_text(prompt).strip()
         print(f"Raw Gemini response: {full_text}")
 
         if "Voice Metrics" in prompt:

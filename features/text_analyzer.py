@@ -1,11 +1,6 @@
 from flask import Blueprint, render_template, request, jsonify
 import requests
-import google.generativeai as genai
-
-# === Gemini Configuration ===
-GEMINI_API_KEY = "AIzaSyAlpyIaKMRn7cVdJLAa5HU0xETAK9E3-08"  # Use securely in production
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+from features.gemini_client import generate_text
 
 # === Grammar API ===
 LANGUAGETOOL_URL = "https://api.languagetool.org/v2/check"
@@ -34,8 +29,7 @@ Text:
 {text}
 """
     try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
+        return generate_text(prompt).strip()
     except Exception as e:
         return f"⚠️ Gemini API error: {str(e)}"
 

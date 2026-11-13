@@ -2,24 +2,17 @@ from flask import Blueprint, request, jsonify, render_template
 import random
 import speech_recognition as sr
 import pyttsx3
-import google.generativeai as genai
 import time
 import uuid
 import logging
 import threading
 import re
+from features.gemini_client import generate_text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 debate_bp = Blueprint('debate', __name__, template_folder='../templates', static_folder='../static')
-
-genai.configure(api_key='') #Place your API key
-try:
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    logger.error(f"Failed to initialize Gemini API: {str(e)}")
-    model = None
 
 debate_topics = [
     "AI in Education",
@@ -174,8 +167,7 @@ def speak_text(text):
 def get_word_definition(word):
     try:
         prompt = f"""Provide a simple, one-sentence definition for the word \"{word}\" that would be understandable by a high school student.\nReturn ONLY the definition with no additional text or formatting."""
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        return generate_text(prompt).strip()
     except Exception as e:
         logger.error(f"Error getting definition for {word}: {str(e)}")
         return None
@@ -186,9 +178,6 @@ def generate_ai_response():
         data = request.json
         user_input = data['user_input']
         debate_state['dialogues'].append({'speaker': 'You', 'text': user_input, 'time': time.strftime('%H:%M')})
-
-        if not model:
-            raise Exception("Gemini API model not initialized")
 
         # Professional debate prompt with strict length requirements
         prompt = f"""Act as a professional debate opponent on the topic: {debate_state['current_topic']}.
@@ -210,14 +199,7 @@ def generate_ai_response():
         - \"That's an interesting perspective, but have you considered X? Studies show Y.\"
         - \"I respectfully disagree because X. The data indicates Y which contradicts your point.\"\n        """
 
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=50,  # Keep responses short
-                temperature=0.7  # Balance creativity and focus
-            )
-        )
-        response_text = response.text.strip()
+        response_text = generate_text(prompt, max_output_tokens=50, temperature=0.7).strip()
 
         # Detect complex words
         complex_words = detect_complex_words(response_text)
@@ -307,14 +289,8 @@ def analyze_debate():
         AI Opponent
         """
 
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=400,
-                temperature=0.3
-            )
-        )
-        analysis_text = response.text.strip()
+        response_text = generate_text(prompt, max_output_tokens=400, temperature=0.3).strip()
+        analysis_text = response_text
 
         # Initialize with defaults that will show if parsing fails
         analysis = {
@@ -372,11 +348,9 @@ def detect_complex_words(text):
     Returns a list of complex words, or an empty list if none are found or on error.
     """
     try:
-        if not model:
-            return []
         prompt = f"""Analyze this text and identify any complex or difficult words that might be challenging for an average reader:\n\n\"{text}\"\n\nReturn ONLY a comma-separated list of the complex words you identify, with no additional explanation or formatting.\nIf no complex words are found, return an empty string."""
-        response = model.generate_content(prompt)
-        complex_words = response.text.strip().split(',') if response.text.strip() else []
+        result = generate_text(prompt).strip()
+        complex_words = result.split(',') if result else []
         return [word.strip() for word in complex_words if word.strip()]
     except Exception as e:
         logger.error(f"Error detecting complex words: {str(e)}")
