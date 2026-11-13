@@ -1,7 +1,15 @@
+
 Flask
 flask-cors
-opencv-python
+opencv-python-headless
 dlib
 numpy
-language-tool-python
+mediapipe
 requests
+language-tool-python
+bcrypt
+PyJWT
+google-generativeai
+SpeechRecognition
+pyttsx3
+gunicorn
