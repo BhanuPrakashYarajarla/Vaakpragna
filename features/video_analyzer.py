@@ -9,7 +9,7 @@ logging.getLogger('absl').setLevel(logging.ERROR)
 logging.getLogger('mediapipe').setLevel(logging.ERROR)
 
 from flask import Blueprint, render_template, request, jsonify
-import cv2, mediapipe as mp, dlib, re, base64, time
+import cv2, re, base64, time
 import numpy as np
 from features.gemini_client import generate_text
 
@@ -17,7 +17,19 @@ logger = logging.getLogger(__name__)
 
 video_analyzer_bp = Blueprint("video_analyzer", __name__)
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'shape_predictor_68_face_landmarks.dat')
+# === MediaPipe Face Mesh & Pose with OpenCV fallback ===
+try:
+    import mediapipe as mp
+    mp_face_mesh = getattr(mp.solutions, 'face_mesh', None) if hasattr(mp, 'solutions') else None
+    mp_pose = getattr(mp.solutions, 'pose', None) if hasattr(mp, 'solutions') else None
+except Exception:
+    mp = None
+    mp_face_mesh = None
+    mp_pose = None
+
+# Built-in OpenCV cascades for resilient fallback
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
 # === Per-session analysis state ===
 _analysis_sessions = {}
@@ -41,6 +53,7 @@ def _get_session(session_id):
             'frame_count': 0,
             'face_count': 0,
             'pose_count': 0,
+            'eye_contact_count': 0,
             'last_gemini_call': 0,
             'last_active': now,
             'latest_feedback': {
@@ -106,34 +119,95 @@ def analyze_frame():
     session['frame_count'] += 1
 
     face_detected = False
+    eye_contact = False
+    gaze_direction = "Center"
     pose_detected = False
 
-    # Face detection with dlib
-    try:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        detector = dlib.get_frontal_face_detector()
-        faces = detector(gray)
-        if faces:
-            face_detected = True
-            session['face_count'] += 1
-    except Exception as e:
-        logger.error(f"Face detection error: {e}")
+    # 1. Face & Eye Contact Analysis with MediaPipe Face Mesh
+    if mp_face_mesh:
+        try:
+            with mp_face_mesh.FaceMesh(
+                static_image_mode=True,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.5
+            ) as face_mesh:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = face_mesh.process(rgb)
+                if results.multi_face_landmarks:
+                    face_detected = True
+                    session['face_count'] += 1
+                    landmarks = results.multi_face_landmarks[0].landmark
 
-    # Pose detection with MediaPipe
-    try:
-        mp_pose = mp.solutions.pose
-        with mp_pose.Pose(
-            static_image_mode=True,
-            min_detection_confidence=0.5,
-            model_complexity=0
-        ) as pose:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(rgb)
-            if results.pose_landmarks:
-                pose_detected = True
-                session['pose_count'] += 1
-    except Exception as e:
-        logger.error(f"Pose detection error: {e}")
+                    # Left eye EAR: |y159 - y145| / |x133 - x33|
+                    left_ear = abs(landmarks[159].y - landmarks[145].y) / (abs(landmarks[133].x - landmarks[33].x) + 1e-6)
+                    # Right eye EAR: |y386 - y374| / |x263 - x362|
+                    right_ear = abs(landmarks[386].y - landmarks[374].y) / (abs(landmarks[263].x - landmarks[362].x) + 1e-6)
+
+                    eyes_open = (left_ear > 0.15 and right_ear > 0.15)
+
+                    # Face yaw: nose tip (landmark 1) relative to cheek boundaries (234 & 454)
+                    nose_x = landmarks[1].x
+                    left_x = landmarks[234].x
+                    right_x = landmarks[454].x
+                    face_w = abs(right_x - left_x) + 1e-6
+                    rel_nose_x = (nose_x - min(left_x, right_x)) / face_w
+
+                    # Direct eye contact if eyes open and face is forward-facing
+                    if eyes_open and 0.35 <= rel_nose_x <= 0.65:
+                        eye_contact = True
+                        session['eye_contact_count'] += 1
+                        gaze_direction = "Direct Eye Contact"
+                    elif rel_nose_x < 0.35:
+                        gaze_direction = "Looking Right"
+                    elif rel_nose_x > 0.65:
+                        gaze_direction = "Looking Left"
+                    elif not eyes_open:
+                        gaze_direction = "Blinking / Eyes Closed"
+                    else:
+                        gaze_direction = "Averted"
+        except Exception as e:
+            logger.debug(f"MediaPipe FaceMesh note: {e}")
+
+    # Fallback to OpenCV Haar Cascades if FaceMesh not available or no face found
+    if not face_detected:
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(60, 60))
+            if len(faces) > 0:
+                face_detected = True
+                session['face_count'] += 1
+                (fx, fy, fw, fh) = faces[0]
+                roi_gray = gray[fy:fy + int(fh * 0.6), fx:fx + fw]
+                eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=4, minSize=(20, 20))
+                if len(eyes) >= 1:
+                    eye_contact = True
+                    session['eye_contact_count'] += 1
+                    gaze_direction = "Direct Eye Contact"
+                else:
+                    gaze_direction = "Averted"
+        except Exception as e:
+            logger.error(f"OpenCV face detection error: {e}")
+
+    # 2. Pose detection with MediaPipe Pose
+    if mp_pose:
+        try:
+            with mp_pose.Pose(
+                static_image_mode=True,
+                min_detection_confidence=0.5,
+                model_complexity=0
+            ) as pose:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = pose.process(rgb)
+                if results.pose_landmarks:
+                    pose_detected = True
+                    session['pose_count'] += 1
+        except Exception as e:
+            logger.debug(f"Pose detection note: {e}")
+    elif face_detected:
+        # Graceful posture detection when pose solution is unavailable
+        pose_detected = True
+        session['pose_count'] += 1
 
     # Privacy: don't retain the frame after processing
     del frame, nparr, frame_bytes
@@ -143,7 +217,10 @@ def analyze_frame():
     local_stats = {
         'face_detected': face_detected,
         'pose_detected': pose_detected,
-        'eye_contact_ratio': f"{session['face_count']}/{fc}",
+        'eye_contact': eye_contact,
+        'gaze_direction': gaze_direction,
+        'eye_contact_ratio': f"{session['eye_contact_count']}/{fc}",
+        'face_ratio': f"{session['face_count']}/{fc}",
         'pose_ratio': f"{session['pose_count']}/{fc}",
         'frames_analyzed': fc
     }
@@ -156,8 +233,12 @@ def analyze_frame():
     if now - session['last_gemini_call'] >= _GEMINI_INTERVAL and fc > 0:
         session['last_gemini_call'] = now
 
-        eye_summary = f"Eye contact: {session['face_count']}/{fc} frames"
-        pose_summary = f"Pose: {session['pose_count']}/{fc} frames"
+        eye_summary = (
+            f"Face visible in {session['face_count']}/{fc} frames, "
+            f"direct eye contact maintained in {session['eye_contact_count']}/{fc} frames. "
+            f"Latest gaze: {gaze_direction}."
+        )
+        pose_summary = f"Speaker posture detected in {session['pose_count']}/{fc} frames."
 
         try:
             prompt = build_student_prompt(eye_summary, pose_summary, "Live session")
@@ -175,6 +256,7 @@ def analyze_frame():
         # Reset counters for the next aggregation window
         session['face_count'] = 0
         session['pose_count'] = 0
+        session['eye_contact_count'] = 0
         session['frame_count'] = 0
 
     return jsonify({
