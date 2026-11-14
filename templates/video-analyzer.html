@@ -131,7 +131,8 @@
                 <div class="bg-white p-6 rounded-lg shadow-md w-full md:w-1/2">
                     <h2 class="text-xl font-semibold mb-4">🎥 Live Analysis</h2>
                     <div class="relative">
-                        <img id="videoFeed" class="w-full h-80 bg-black rounded mb-4" src="" alt="Live Feed">
+                        <video id="videoFeed" class="w-full h-80 bg-black rounded mb-4" autoplay playsinline muted></video>
+                        <canvas id="captureCanvas" class="hidden"></canvas>
                         <div class="absolute top-2 right-2 bg-black bg-opacity-50 text-white px-2 py-1 rounded text-sm">
                             <span id="recordingStatus">Not Recording</span>
                         </div>

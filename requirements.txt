@@ -1,4 +1,3 @@
-
 Flask
 flask-cors
 opencv-python-headless
@@ -9,7 +8,5 @@ requests
 language-tool-python
 bcrypt
 PyJWT
-google-generativeai
-SpeechRecognition
-pyttsx3
+google-genai
 gunicorn
