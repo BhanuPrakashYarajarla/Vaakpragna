@@ -47,7 +47,12 @@ def check_grammar_route():
 
     # Run LanguageTool check
     params = {"text": text, "language": "en-US"}
-    response = requests.post(LANGUAGETOOL_URL, data=params)
+    response = requests.post(
+        LANGUAGETOOL_URL,
+        data=params,
+        timeout=20
+    )
+    response.raise_for_status()
     data = response.json()
 
     corrections = []

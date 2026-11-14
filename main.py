@@ -542,5 +542,11 @@ def api_leaderboard():
         if 'conn' in locals():
             conn.close()
 
+@app.route("/test-gemini")
+def test_gemini():
+    from features.gemini_client import generate_text
+    result = generate_text("Reply with exactly: Gemini is working")
+    return {"result": result}
+
 if __name__ == "__main__":
     app.run(debug=True)
