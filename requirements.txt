@@ -9,6 +9,4 @@ language-tool-python
 bcrypt
 PyJWT
 google-genai
-SpeechRecognition
-pyttsx3
 gunicorn

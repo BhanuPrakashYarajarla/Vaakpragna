@@ -26,3 +26,4 @@ def generate_text(prompt, max_output_tokens=None, temperature=None):
     )
 
     return response.text or ""
+

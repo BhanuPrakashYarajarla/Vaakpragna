@@ -8,42 +8,205 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 logging.getLogger('absl').setLevel(logging.ERROR)
 logging.getLogger('mediapipe').setLevel(logging.ERROR)
 
-from flask import Blueprint, render_template, request, jsonify, Response
-import cv2, mediapipe as mp, dlib, re
+from flask import Blueprint, render_template, request, jsonify
+import cv2, mediapipe as mp, dlib, re, base64, time
 import numpy as np
 from features.gemini_client import generate_text
+
+logger = logging.getLogger(__name__)
 
 video_analyzer_bp = Blueprint("video_analyzer", __name__)
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'shape_predictor_68_face_landmarks.dat')
 
-camera_active = False
-latest_live_feedback = {"judgment": "", "eye_contact": "", "body_language": "", "tone_pace": "", "tips": ""}
+# === Per-session analysis state ===
+_analysis_sessions = {}
+_SESSION_TIMEOUT = 300  # 5 minutes
+_GEMINI_INTERVAL = 12   # seconds between Gemini calls
+
+# Max frame payload size (2 MB base64 ≈ ~1.5 MB image)
+_MAX_FRAME_SIZE = 2 * 1024 * 1024
+
+
+def _get_session(session_id):
+    """Get or create an analysis session, cleaning up expired ones."""
+    now = time.time()
+    expired = [k for k, v in _analysis_sessions.items()
+               if now - v['last_active'] > _SESSION_TIMEOUT]
+    for k in expired:
+        del _analysis_sessions[k]
+
+    if session_id not in _analysis_sessions:
+        _analysis_sessions[session_id] = {
+            'frame_count': 0,
+            'face_count': 0,
+            'pose_count': 0,
+            'last_gemini_call': 0,
+            'last_active': now,
+            'latest_feedback': {
+                'judgment': '',
+                'eye_contact': '',
+                'body_language': '',
+                'tone_pace': '',
+                'tips': ''
+            }
+        }
+    else:
+        _analysis_sessions[session_id]['last_active'] = now
+    return _analysis_sessions[session_id]
+
+
+# === Routes ===
 
 @video_analyzer_bp.route("/video-analyzer")
 def video_page():
     return render_template("video-analyzer.html")
 
-@video_analyzer_bp.route("/start_live")
-def start_live():
-    global camera_active
-    camera_active = True
-    return Response(gen_live(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@video_analyzer_bp.route("/stop_live")
-def stop_live():
-    global camera_active
-    camera_active = False
-    return jsonify({"message": "Live feed stopped"})
+@video_analyzer_bp.route("/analyze_frame", methods=["POST"])
+def analyze_frame():
+    """Receive a base64 JPEG frame from the browser, run local CV analysis,
+    and periodically aggregate stats for a Gemini feedback call."""
+    data = request.get_json()
+    if not data or 'frame' not in data:
+        return jsonify({'error': 'No frame data provided'}), 400
+
+    session_id = data.get('session_id', 'default')
+    frame_b64 = data['frame']
+
+    # --- Input validation ---
+    if len(frame_b64) > _MAX_FRAME_SIZE:
+        return jsonify({'error': 'Frame too large (max 2 MB)'}), 400
+
+    # Strip data-URL prefix if present
+    if ',' in frame_b64:
+        frame_b64 = frame_b64.split(',', 1)[1]
+
+    try:
+        frame_bytes = base64.b64decode(frame_b64)
+    except Exception:
+        return jsonify({'error': 'Invalid base64 data'}), 400
+
+    # Validate JPEG magic bytes
+    if not frame_bytes[:2] == b'\xff\xd8':
+        return jsonify({'error': 'Invalid JPEG format'}), 400
+
+    # Decode to numpy array
+    nparr = np.frombuffer(frame_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return jsonify({'error': 'Could not decode image'}), 400
+
+    h, w = frame.shape[:2]
+    if h < 50 or w < 50 or h > 2160 or w > 3840:
+        return jsonify({'error': f'Invalid frame dimensions: {w}x{h}'}), 400
+
+    # --- Local CV processing ---
+    session = _get_session(session_id)
+    session['frame_count'] += 1
+
+    face_detected = False
+    pose_detected = False
+
+    # Face detection with dlib
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        detector = dlib.get_frontal_face_detector()
+        faces = detector(gray)
+        if faces:
+            face_detected = True
+            session['face_count'] += 1
+    except Exception as e:
+        logger.error(f"Face detection error: {e}")
+
+    # Pose detection with MediaPipe
+    try:
+        mp_pose = mp.solutions.pose
+        with mp_pose.Pose(
+            static_image_mode=True,
+            min_detection_confidence=0.5,
+            model_complexity=0
+        ) as pose:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = pose.process(rgb)
+            if results.pose_landmarks:
+                pose_detected = True
+                session['pose_count'] += 1
+    except Exception as e:
+        logger.error(f"Pose detection error: {e}")
+
+    # Privacy: don't retain the frame after processing
+    del frame, nparr, frame_bytes
+
+    # --- Build local stats ---
+    fc = session['frame_count']
+    local_stats = {
+        'face_detected': face_detected,
+        'pose_detected': pose_detected,
+        'eye_contact_ratio': f"{session['face_count']}/{fc}",
+        'pose_ratio': f"{session['pose_count']}/{fc}",
+        'frames_analyzed': fc
+    }
+
+    # --- Periodic Gemini call (every ~12 s) ---
+    now = time.time()
+    feedback = session['latest_feedback']
+    gemini_updated = False
+
+    if now - session['last_gemini_call'] >= _GEMINI_INTERVAL and fc > 0:
+        session['last_gemini_call'] = now
+
+        eye_summary = f"Eye contact: {session['face_count']}/{fc} frames"
+        pose_summary = f"Pose: {session['pose_count']}/{fc} frames"
+
+        try:
+            prompt = build_student_prompt(eye_summary, pose_summary, "Live session")
+            result = call_gemini(prompt)
+            feedback.update({
+                'judgment': result.get('judgment', 'Not available'),
+                'eye_contact': result.get('eye_contact', 'Not available'),
+                'body_language': result.get('body_language', 'Not available'),
+                'tips': result.get('tips', 'Not available')
+            })
+            gemini_updated = True
+        except Exception as e:
+            logger.error(f"Gemini feedback error: {e}")
+
+        # Reset counters for the next aggregation window
+        session['face_count'] = 0
+        session['pose_count'] = 0
+        session['frame_count'] = 0
+
+    return jsonify({
+        'stats': local_stats,
+        'feedback': feedback,
+        'gemini_updated': gemini_updated
+    })
+
+
+@video_analyzer_bp.route("/reset_session", methods=["POST"])
+def reset_session():
+    """Clean up analysis session when the user stops."""
+    data = request.get_json() or {}
+    session_id = data.get('session_id', 'default')
+    if session_id in _analysis_sessions:
+        del _analysis_sessions[session_id]
+    return jsonify({'message': 'Session reset'})
+
 
 @video_analyzer_bp.route("/live_feedback")
 def live_feedback():
-    print(f"Serving feedback: {latest_live_feedback}")
-    return jsonify(latest_live_feedback)
+    session_id = request.args.get('session_id', 'default')
+    session = _get_session(session_id)
+    return jsonify(session['latest_feedback'])
+
 
 @video_analyzer_bp.route("/analyze_voice", methods=["POST"])
 def analyze_voice():
     data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
     transcript = data.get("transcript", "")
     speech_rate = data.get("speech_rate", 0)
     pitch_variation = data.get("pitch_variation", 0)
@@ -54,80 +217,16 @@ def analyze_voice():
     voice_info = f"Speech rate: {speech_rate} words/min, Pitch variation: {pitch_variation}"
     prompt = build_voice_prompt(voice_info)
     result = call_gemini(prompt)
-    print(f"Voice analysis result: {result}")
     if "error" in result:
         return jsonify(result), 500
-    latest_live_feedback["tone_pace"] = result.get("tone_pace", "Not available")
-    return jsonify(latest_live_feedback)
 
-def gen_live():
-    global camera_active, latest_live_feedback
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Could not open webcam")
-        return
+    session_id = data.get('session_id', 'default')
+    session = _get_session(session_id)
+    session['latest_feedback']['tone_pace'] = result.get("tone_pace", "Not available")
+    return jsonify(session['latest_feedback'])
 
-    detector = dlib.get_frontal_face_detector()
-    predictor = dlib.shape_predictor(MODEL_PATH)
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=1)
 
-    frame_count = 0
-    face_count = 0
-    pose_count = 0
-
-    while camera_active and cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame_count += 1
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = detector(gray)
-        if faces:
-            face_count += 1
-            shape = predictor(gray, faces[0])
-            for i in range(36, 48):
-                cv2.circle(frame, (shape.part(i).x, shape.part(i).y), 2, (0, 255, 0), -1)
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pose.process(rgb)
-        if results.pose_landmarks:
-            pose_count += 1
-            mp.solutions.drawing_utils.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-
-        if frame_count % 15 == 0:
-            eye_summary = f"Eye contact: {face_count}/{frame_count} frames"
-            pose_summary = f"Pose: {pose_count}/{frame_count} frames"
-            print(f"Live metrics: {eye_summary}, {pose_summary}")
-            prompt = build_student_prompt(eye_summary, pose_summary, "Live session")
-            feedback = call_gemini(prompt)
-            print(f"Video feedback: {feedback}")
-            latest_live_feedback.update({
-                "judgment": feedback.get("judgment", "Not available"),
-                "eye_contact": feedback.get("eye_contact", "Not available"),
-                "body_language": feedback.get("body_language", "Not available"),
-                "tips": feedback.get("tips", "Not available")
-            })
-
-            transcript = "Sample live speech for analysis."
-            speech_rate = np.random.randint(120, 180)
-            pitch_variation = np.random.randint(50, 100)
-            voice_info = f"Speech rate: {speech_rate} words/min, Pitch variation: {pitch_variation}"
-            voice_prompt = build_voice_prompt(voice_info)
-            voice_result = call_gemini(voice_prompt)
-            print(f"Voice feedback: {voice_result}")
-            latest_live_feedback["tone_pace"] = voice_result.get("tone_pace", "Not available")
-
-            print(f"Updated latest_live_feedback: {latest_live_feedback}")
-            face_count = 0
-            pose_count = 0
-            frame_count = 0
-
-        _, buffer = cv2.imencode('.jpg', frame)
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
-    cap.release()
-    cv2.destroyAllWindows()
+# === Prompt builders and Gemini helpers ===
 
 def build_student_prompt(eye_info, pose_info, topic_summary):
     return f"""
@@ -149,6 +248,7 @@ Use a positive, encouraging tone.
 {topic_summary}
 """
 
+
 def build_voice_prompt(voice_info):
     return f"""
 You are a professional public speaking coach.
@@ -163,16 +263,17 @@ Voice Metrics:
 {voice_info}
 """
 
+
 def call_gemini(prompt):
     try:
         full_text = generate_text(prompt).strip()
-        print(f"Raw Gemini response: {full_text}")
 
         if "Voice Metrics" in prompt:
             tone_detected = extract_section(full_text, "1. Detected Tone:")
             tone_feedback = extract_section(full_text, "2. Tone and Pace Feedback:")
             return {
-                "tone_pace": f"{tone_feedback} (Tone detected: {tone_detected})" if tone_feedback and tone_detected else "Not available"
+                "tone_pace": f"{tone_feedback} (Tone detected: {tone_detected})"
+                             if tone_feedback and tone_detected else "Not available"
             }
 
         return {
@@ -182,7 +283,7 @@ def call_gemini(prompt):
             "tips": extract_section(full_text, "4. Improvement Tips:")
         }
     except Exception as e:
-        print(f"Gemini API error: {str(e)}")
+        logger.error(f"Gemini API error: {str(e)}")
         if "Voice Metrics" in prompt:
             return {"tone_pace": "Error in analysis"}
         return {
@@ -191,6 +292,7 @@ def call_gemini(prompt):
             "body_language": "Error in analysis",
             "tips": "Error in analysis"
         }
+
 
 def extract_section(text, marker):
     pattern = rf"{re.escape(marker)}\s*(.*?)(?=\n\d+\.|\Z|-|\n\n)"
@@ -203,4 +305,3 @@ def extract_section(text, marker):
             next_section = parts[1].split('\n', 1)[0].strip()
             return next_section.lstrip("*\u2022- ").strip()
     return "Not available"
-

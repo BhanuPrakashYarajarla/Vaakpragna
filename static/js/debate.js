@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let wins = 0;
     let losses = 0;
     let totalPoints = 0;
+    let roomId = null; // Room ID for per-session debate state
 
     // Speech Recognition Setup
     try {
@@ -63,9 +64,10 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) {
         console.error('Speech recognition not supported', e);
         micButton.disabled = true;
-        micStatus.textContent = 'Microphone status: Not supported';
-        micStatus.className = 'text-sm text-red-600 mt-2';
-        micIcon.className = 'ri-mic-off-line text-red-600';
+        micStatus.textContent = 'Voice input unavailable in this browser — please type your response';
+        micStatus.className = 'text-sm text-orange-600 mt-2';
+        micStatus.style.display = 'block';
+        micIcon.className = 'ri-mic-off-line text-gray-400';
     }
 
 // Voice Button Handler
@@ -134,7 +136,7 @@ micButton.addEventListener('click', () => {
         fetch('/debate/generate_ai_response', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_input: userText })
+            body: JSON.stringify({ user_input: userText, room_id: roomId })
         })
         .then(response => {
             if (!response.ok) {
@@ -280,6 +282,8 @@ micButton.addEventListener('click', () => {
                 acceptTopicButton.style.display = 'block';
                 startButton.disabled = true;
                 startButton.className = 'bg-gray-400 text-white px-5 py-2 rounded-full whitespace-nowrap transition-colors';
+            } else if (data.room_id) {
+                roomId = data.room_id;
             }
         })
         .catch(error => {
@@ -324,7 +328,8 @@ micButton.addEventListener('click', () => {
             const settings = {
                 style: selectedStyle,
                 difficulty: difficultyMap[document.querySelector('input[name="ai-difficulty"]').value],
-                time_per_turn: document.querySelector('input[name="time-per-turn"]').value
+                time_per_turn: document.querySelector('input[name="time-per-turn"]').value,
+                room_id: roomId
             };
             fetch('/debate/set_debate_settings', {
                 method: 'POST',
@@ -350,7 +355,8 @@ micButton.addEventListener('click', () => {
             const settings = {
                 style: debateStyle,
                 difficulty: document.querySelector('.difficulty-value').textContent,
-                time_per_turn: document.querySelector('input[name="time-per-turn"]').value
+                time_per_turn: document.querySelector('input[name="time-per-turn"]').value,
+                room_id: roomId
             };
             fetch('/debate/set_debate_settings', {
                 method: 'POST',
@@ -402,7 +408,7 @@ micButton.addEventListener('click', () => {
                         fetch('/debate/generate_ai_response', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ user_input: 'No input provided.' })
+                            body: JSON.stringify({ user_input: 'No input provided.', room_id: roomId })
                         })
                         .then(response => response.json())
                         .then(data => {

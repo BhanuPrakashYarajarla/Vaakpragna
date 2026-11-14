@@ -219,52 +219,38 @@ margin: 0;
       return 180; // default 3 minutes
     };
 
-    const generateJudgement = async (player1Text, player2Text) => {
+    const generateJudgement = async () => {
       try {
-        const prompt = `
-You are a professional debate judge.
+        // Collect arguments grouped by player from argumentHistory
+        const player1Args = argumentHistory
+          .filter(a => a.player === 1)
+          .map(a => a.text);
+        const player2Args = argumentHistory
+          .filter(a => a.player === 2)
+          .map(a => a.text);
 
-Analyze the arguments of two players. Structure your response like this:
-
-🏆 Winner: Player X
-
-🎯 Player 1
-Score: (number out of 100)
-Strengths:
-- ...
-Weaknesses:
-- ...
-Improvements:
-- ...
-
-🎯 Player 2
-Score: (number out of 100)
-Strengths:
-- ...
-Weaknesses:
-- ...
-Improvements:
-- ...
-
-Be detailed and fair. No extra commentary.
-
-Player 1: ${player1Text}
-Player 2: ${player2Text}
-`;
-
-        const apiKey = "";  // Place your Google API
-        const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey, {
+        const response = await fetch("/debate/judge_friend_debate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+          body: JSON.stringify({
+            topic: debateTopic,
+            player1_arguments: player1Args,
+            player2_arguments: player2Args
+          })
         });
 
+        if (!response.ok) {
+          throw new Error(`Server error: ${response.status}`);
+        }
+
         const data = await response.json();
-        const resultText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        
-        // Extract winner from result
-        const winnerMatch = resultText.match(/🏆 Winner: (Player \d)/);
-        const winnerName = winnerMatch ? winnerMatch[1] : "Draw";
+
+        if (data.error) {
+          throw new Error(data.error);
+        }
+
+        const resultText = data.judgement || "";
+        const winnerName = data.winner || "Draw";
         
         setWinner(winnerName);
         setShowWinnerPopup(true);
@@ -288,6 +274,7 @@ Player 2: ${player2Text}
         document.body.appendChild(modal);
       } catch (error) {
         console.error("Error generating judgement:", error);
+        alert("Failed to generate judgement. Please try again.");
         setWinner("Draw");
         setShowWinnerPopup(true);
       }
@@ -317,7 +304,7 @@ Player 2: ${player2Text}
       
       // Check if debate is complete based on totalTurns
       if (newTurnCount >= totalTurns) {
-        generateJudgement(player1Argument, player2Argument);
+        generateJudgement();
       } else {
         // Set timer for next phase
         setTimeLeft(getTimeForPhase(newPhase));
