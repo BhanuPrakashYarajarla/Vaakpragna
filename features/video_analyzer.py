@@ -28,8 +28,17 @@ except Exception:
     mp_pose = None
 
 # Built-in OpenCV cascades for resilient fallback
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+cascade_dir = cv2.data.haarcascades
+face_cascade_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
+eye_cascade_path = os.path.join(cascade_dir, "haarcascade_eye.xml")
+
+face_cascade = cv2.CascadeClassifier(face_cascade_path)
+eye_cascade = cv2.CascadeClassifier(eye_cascade_path)
+
+if face_cascade.empty():
+    raise RuntimeError("Failed to load face cascade")
+if eye_cascade.empty():
+    raise RuntimeError("Failed to load eye cascade")
 
 # === Per-session analysis state ===
 _analysis_sessions = {}
