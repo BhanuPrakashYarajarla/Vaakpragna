@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, jsonify, make_response
 from features.text_analyzer import text_analyzer_bp
 from features.video_analyzer import video_analyzer_bp
 from features.debate_with_ai import debate_bp
+import os
 import sqlite3
 import bcrypt
 import jwt
@@ -10,7 +11,7 @@ from functools import wraps
 import logging
 
 app = Flask(__name__)
-SECRET_KEY = "your-secret-key"  # Replace with a secure key in production
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 
 # === Logging Setup ===
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
