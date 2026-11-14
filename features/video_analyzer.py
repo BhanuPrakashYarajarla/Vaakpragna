@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 video_analyzer_bp = Blueprint("video_analyzer", __name__)
 
-# === MediaPipe Face Mesh & Pose with OpenCV fallback ===
+# === MediaPipe Face Mesh & Pose ===
 try:
     import mediapipe as mp
     mp_face_mesh = getattr(mp.solutions, 'face_mesh', None) if hasattr(mp, 'solutions') else None
@@ -27,18 +27,10 @@ except Exception:
     mp_face_mesh = None
     mp_pose = None
 
-# Built-in OpenCV cascades for resilient fallback
-cascade_dir = cv2.data.haarcascades
-face_cascade_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
-eye_cascade_path = os.path.join(cascade_dir, "haarcascade_eye.xml")
-
-face_cascade = cv2.CascadeClassifier(face_cascade_path)
-eye_cascade = cv2.CascadeClassifier(eye_cascade_path)
-
-if face_cascade.empty():
-    raise RuntimeError("Failed to load face cascade")
-if eye_cascade.empty():
-    raise RuntimeError("Failed to load eye cascade")
+if mp_face_mesh is None:
+    logger.warning("MediaPipe Face Mesh is unavailable")
+if mp_pose is None:
+    logger.warning("MediaPipe Pose is unavailable")
 
 # === Per-session analysis state ===
 _analysis_sessions = {}
@@ -178,25 +170,6 @@ def analyze_frame():
         except Exception as e:
             logger.debug(f"MediaPipe FaceMesh note: {e}")
 
-    # Fallback to OpenCV Haar Cascades if FaceMesh not available or no face found
-    if not face_detected:
-        try:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(60, 60))
-            if len(faces) > 0:
-                face_detected = True
-                session['face_count'] += 1
-                (fx, fy, fw, fh) = faces[0]
-                roi_gray = gray[fy:fy + int(fh * 0.6), fx:fx + fw]
-                eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=4, minSize=(20, 20))
-                if len(eyes) >= 1:
-                    eye_contact = True
-                    session['eye_contact_count'] += 1
-                    gaze_direction = "Direct Eye Contact"
-                else:
-                    gaze_direction = "Averted"
-        except Exception as e:
-            logger.error(f"OpenCV face detection error: {e}")
 
     # 2. Pose detection with MediaPipe Pose
     if mp_pose:
